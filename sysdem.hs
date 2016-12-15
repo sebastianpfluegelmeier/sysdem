@@ -4,12 +4,10 @@ import Data.Int (Int32)
 import Data.List.Split (splitOn)
 import Data.Fixed
 
-samplesPS = 44000
+samplesPS = 44100
 bitrate = 32
 
 header = WAVEHeader 2 samplesPS bitrate Nothing
-
-mapDoubleToSample x = map doubleToSample x
 
 twist :: [[Int32]] -> [[Int32]]
 twist x  
@@ -19,36 +17,38 @@ twist x
 -- *** export functions
 
   -- ** signal functions
-conSig :: Double -> Signal
-conSig x = [x, x ..]
+cons :: Sample -> Signal
+cons x = [x, x ..]
 
-linearSig :: Double -> Double -> Int -> Signal
-linearSig start end length =
+linSig :: Sample -> Sample -> Length -> Signal
+linSig start end length =
         [start + (end - start) * (fromIntegral current / fromIntegral length) | current <- [0,1 .. length]]
 
-linearSegments :: [(Double, Int)] -> Double -> Signal
-linearSegments ((amp, len):[])              lastAmp = linearSig amp lastAmp len
-linearSegments ((amp,len):(amp2,len2):rest) lastAmp = 
+linSigs :: [(Sample, Length)] -> Sample -> Signal
+linSigs ((amp, len):[])                lastAmp = linearSig amp lastAmp len
+linSigs ((amp, len):(amp2, len2):rest) lastAmp = 
                 linearSig amp amp2 len ++ linearSegments ((amp2, len2):rest) lastAmp
 
 
   -- ** audio functions
+    -- * delay
+--delay :: Signal -> Signal -> Signal -> Signal -> Signal
+--delay feedback length amounth signal =  
+
     -- * distortion
     
 hardDist :: Kernel -> Signal
 hardDist x = map (hardDistSample) x
 
-hardDistSample :: Double -> Double
+hardDistSample :: Sample -> Sample
 hardDistSample sig
         | sig >  1.0   =  1.0
         | sig < -1.0   = -1.0
         | otherwise  = sig
-{--
-fnDist :: (Double -> Double) -> Signal -> Signal
-fnDist fn sig 
-    | sig > 0.0  = map (fn) sig
-    | otherwise  = map ((* (-1)).fn.(* (-1))) sig
-    --}
+
+fnDist :: (Sample -> Sample) -> Signal -> Signal
+fnDist fn sig = map (\x -> if x >= 0 then fn x else (tmo.fn.tmo) x) sig
+        where tmo x = x * (-1.0)
 
     -- * filters
 applyFilterKernel :: Signal -> Signal -> Signal
@@ -56,7 +56,7 @@ applyFilterKernel kernel (x:xs)
     | length (x:xs) > length kernel = (kernelize (take (length kernel) (x:xs)) kernel) : applyFilterKernel kernel xs
     | otherwise           = []
 
-kernelize :: Signal -> Kernel -> Double
+kernelize :: Signal -> Kernel -> Sample
 kernelize segment kernel = foldl (+) 0 (zipWith (*) kernel segment)
 
 linearKernel :: Int -> Kernel
@@ -66,24 +66,27 @@ linearKernel size = normalizeKernel $ map fromIntegral $ halfAKernel ++ (reverse
 normalizeKernel :: Kernel -> Kernel
 normalizeKernel x = map (/ (foldl (+) 0 x)) x
 
-recursiveFilter :: Signal -> Signal -> Signal
-recursiveFilter beta signal = recursiveFilter' beta signal 0
+lp :: Signal -> Signal -> Signal
+lp freq signal = lp' (map (\x -> (1.0 / (x / 4000))) freq) signal 0
 
-recursiveFilter' :: Signal -> Signal -> Double -> Signal
-recursiveFilter' beta         []         _   = []
-recursiveFilter' []           x          _   = []
-recursiveFilter' (beta:betas) (sig:sigs) avg = avg : recursiveFilter' betas sigs (avg * beta + (sig * (1 - beta)))
+lp' :: Signal -> Signal -> Sample -> Signal
+lp' beta         []         _   = []
+lp' []           x          _   = []
+lp' (beta:betas) (sig:sigs) avg = avg : lp' betas sigs (avg * beta + (sig * (1 - beta)))
+
+hp :: Signal -> Signal -> Signal
+hp beta signal = zipWith (-) signal (lp beta signal)
     
     -- * oscillators
-additiveFn :: (Double -> Double -> Double) -> Signal -> Int -> Signal
+additiveFn :: (Sample -> Sample -> Sample) -> Signal -> Int -> Signal
 additiveFn fn freq otones = additiveFn' fn freq otones 1
 
-additiveFn' :: (Double -> Double -> Double) -> Signal -> Int -> Int -> Signal
+additiveFn' :: (Sample -> Sample -> Sample) -> Signal -> Int -> Int -> Signal
 additiveFn' fn freq otones nth 
             | nth > otones = [0.0, 0.0 ..]
             | otherwise    = zipWith (+) (partialFn (fn (fromIntegral nth)) freq) (additiveFn' fn freq otones (nth + 1))
 
-partialFn :: (Double -> Double) -> Signal -> Signal
+partialFn :: (Sample -> Sample) -> Signal -> Signal
 partialFn fn freq = zipWith (*) (fnToOsc (sine) freq) [(fn x) | x <- [1.0 ..]]
 
 additive :: MultiSignal -> Signal -> Signal
@@ -97,57 +100,70 @@ partial :: Signal -> Signal -> Signal
 partial amp freq = zipWith (*) (fnToOsc (sine) freq) amp
 
 
-fnToOsc :: (Double -> Double) -> Signal -> Signal
+fnToOsc :: (Sample -> Sample) -> Signal -> Signal
 fnToOsc fn x = fnToOsc' fn x 0
 
-fnToOsc' :: (Double -> Double) -> Signal -> Double -> Signal
+fnToOsc' :: (Sample -> Sample) -> Signal -> Sample -> Signal
 fnToOsc' fn [] phase = []
 fnToOsc' fn x  phase = (fn phase) : fnToOsc' fn (tail x) (head x / (fromIntegral samplesPS) + phase)
 
-sine :: Double -> Double
+sine :: Sample -> Sample
 sine x = sin (x * pi / 2)
 
-saw :: Double -> Double
-saw x = (mod' x 1) * 2 - 1
+saw :: Sample -> Sample
+saw x = (mod' x 4) / 2 - 1
 
-square :: Double -> Double
+square :: Sample -> Sample
 square x
-    | mod' x 1 < 0.5   = -1
+    | mod' x 4 < 2.0   = -1
     | otherwise = 1
 
-tri :: Double -> Double
-tri x 
-    | mod' x 1 < 0.5 = x * 2 - 1
-    | otherwise      = - (x * 2 - 1)
+tri :: Sample -> Sample
+tri x = 2 * abs (tri (x / 2)) - 1
 
   -- ** utility functions
-nestedMap :: (a -> b) -> [[a]] -> [[b]]
-nestedMap fn list = map (map fn) list 
+  
+      -- signal pipe
+a =>> b = b $ a
 
 normalize :: MultiSignal -> MultiSignal
-normalize sig = nestedMap (/peak) sig
+normalize sig = map (map (/peak)) sig
         where peak = maximum $ map maximum sig 
 
 zipN :: (a -> a -> a) -> [[a]] -> [a]
 zipN fn (x:[]) = x
 zipN fn (x:xs) = zipWith (fn) x (zipN fn xs)
 
-seconds :: Double -> Int
-seconds x = round $ x * fromIntegral samplesPS
+s :: Sample -> Length
+s x = round $ x * fromIntegral samplesPS
 
-loop :: Int -> Signal -> Signal
+loop :: Int -> [a] -> [a]
 loop 0 list = []
 loop x list = list ++ loop (x - 1) list
 
 stereo :: Signal -> MultiSignal
 stereo x = [x, x]
 
-sdlw :: MultiSignal -> IO ()
-sdlw smp = putWAVEFile "out.wav" (WAVE header $ twist $ map (mapDoubleToSample) smp)
+sysdem :: MultiSignal -> IO ()
+sysdem smp = putWAVEFile "out.wav" (WAVE header $ twist $ map (map doubleToSample) smp)
 
+  -- ** note functions
+n :: Note -> Sample
+n note =  2 ** ((fromIntegral note - 49) / 12) * 440
+
+melody :: [Note] -> Signal
+melody []                 = []
+melody (note:length:rest) = loop length [(n note)] ++ melody rest
+
+notesLengths :: [Note] -> [Length] -> Signal
+notesLengths notes lengths = melody $ recursiveNL notes lengths
+    where recursiveNL lista listb = if lista == [] || listb == [] then [] else (head lista) : (head listb) : recursiveNL (tail lista) (tail listb) 
   -- ** archive
 
   --  *** constructors 
-type Kernel = [Double]
-type Signal = [Double]
+type Kernel = [Sample]
+type Signal = [Sample]
+type Note   = Int
+type Length = Int
+type Sample = Double 
 type MultiSignal = [Signal]
