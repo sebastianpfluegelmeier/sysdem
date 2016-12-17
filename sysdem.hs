@@ -17,17 +17,17 @@ twist x
 -- *** export functions
 
   -- ** signal functions
-cons :: Sample -> Signal
-cons x = [x, x ..]
+c :: Sample -> Signal
+c x = [x, x ..]
 
 linSig :: Sample -> Sample -> Length -> Signal
 linSig start end length =
         [start + (end - start) * (fromIntegral current / fromIntegral length) | current <- [0,1 .. length]]
 
 linSigs :: [(Sample, Length)] -> Sample -> Signal
-linSigs ((amp, len):[])                lastAmp = linearSig amp lastAmp len
+linSigs ((amp, len):[])                lastAmp = linSig amp lastAmp len
 linSigs ((amp, len):(amp2, len2):rest) lastAmp = 
-                linearSig amp amp2 len ++ linearSegments ((amp2, len2):rest) lastAmp
+                linSig amp amp2 len ++ linSigs ((amp2, len2):rest) lastAmp
 
 
   -- ** audio functions
@@ -51,21 +51,8 @@ fnDist fn sig = map (\x -> if x >= 0 then fn x else (tmo.fn.tmo) x) sig
         where tmo x = x * (-1.0)
 
     -- * filters
-applyFilterKernel :: Signal -> Signal -> Signal
-applyFilterKernel kernel (x:xs) 
-    | length (x:xs) > length kernel = (kernelize (take (length kernel) (x:xs)) kernel) : applyFilterKernel kernel xs
-    | otherwise           = []
 
-kernelize :: Signal -> Kernel -> Sample
-kernelize segment kernel = foldl (+) 0 (zipWith (*) kernel segment)
-
-linearKernel :: Int -> Kernel
-linearKernel size = normalizeKernel $ map fromIntegral $ halfAKernel ++ (reverse halfAKernel)
-        where halfAKernel = ([x | x <- [0..size]])
-
-normalizeKernel :: Kernel -> Kernel
-normalizeKernel x = map (/ (foldl (+) 0 x)) x
-
+-- frequency stuff not working yet
 lp :: Signal -> Signal -> Signal
 lp freq signal = lp' (map (\x -> (1.0 / (x / 4000))) freq) signal 0
 
@@ -75,7 +62,28 @@ lp' []           x          _   = []
 lp' (beta:betas) (sig:sigs) avg = avg : lp' betas sigs (avg * beta + (sig * (1 - beta)))
 
 hp :: Signal -> Signal -> Signal
-hp beta signal = zipWith (-) signal (lp beta signal)
+hp beta input = zipWith (-) input (lp beta input)
+
+bp :: Signal -> Signal -> Signal -> Signal
+bp freq bandwidth input = input =>> (lp freq) =>> (hp (zipWith (+) freq bandwidth))
+
+notch :: Signal -> Signal -> Signal -> Signal
+notch freq bandwidth input = zipWith (-) (notch freq bandwidth input) (input)
+
+hishelf :: Signal -> Signal -> Signal -> Signal
+hishelf  freq gain input = zipWith (+) low (zipWith (*) high gain)
+       where low  = lp freq input
+             high = zipWith (-) low input
+
+-- biquad b0 b1 b2 a0 a1 a2 x:xs:xss:xsss = [x | x <- biquad' b0 b1 b2 a0 a1 a2 x xs xss]
+-- biquad :: Signal -> Signal -> Signal -> Signal -> Signal -> Signal -> Signal
+
+
+-- not finished
+lowShelf :: Signal -> Signal -> Signal -> Signal
+lowShelf  freq gain input = zipWith (+) high (zipWith (*) low gain)
+       where high  = hp freq input
+             low = zipWith (-) low input
     
     -- * oscillators
 additiveFn :: (Sample -> Sample -> Sample) -> Signal -> Int -> Signal
@@ -123,6 +131,9 @@ tri x = 2 * abs (tri (x / 2)) - 1
 
   -- ** utility functions
   
+wide :: (Signal -> Signal) -> Signal -> Signal -> MultiSignal
+wide fn mono diff = [fn (zipWith (+) mono diff), fn (zipWith (-) mono diff)]
+
       -- signal pipe
 a =>> b = b $ a
 
@@ -158,6 +169,7 @@ melody (note:length:rest) = loop length [(n note)] ++ melody rest
 notesLengths :: [Note] -> [Length] -> Signal
 notesLengths notes lengths = melody $ recursiveNL notes lengths
     where recursiveNL lista listb = if lista == [] || listb == [] then [] else (head lista) : (head listb) : recursiveNL (tail lista) (tail listb) 
+
   -- ** archive
 
   --  *** constructors 
